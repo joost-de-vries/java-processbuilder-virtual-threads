@@ -116,8 +116,8 @@ Unfortunately `java.lang.Process.deastroy()` doesn't signal child processes. So 
 ```
 
 Some alternatives that were considered before using virtual threads and structured concurrency:  
-We could follow the lead of `java.lang.Process.onExit` and use `CompletableFuture`s to read the input streams. For instance using `CompletableFuture.supplyAsync`. That would run the task on the `ForkJoinPool.commonPool()`. But then we need to take special care to mark the task as blocking. Otherwise our pool will quickly run out. For instance using `ForkJoinPool.managedBlock`. It's doable but involves more code and joining the 4 `CompletableFuture`s is not that straightforward in Java. Java not having something like a `do notation` (for comprehension ...) to easily combine futures.  
-We could create a `Runnable` class to read from input stream. But then the threads will have to report back errors to the main thread. 
+- We could follow the lead of `java.lang.Process.onExit` and use `CompletableFuture`s to read the input streams. For instance using `CompletableFuture.supplyAsync`. That would run the task on the `ForkJoinPool.commonPool()`. But then we need to take special care to mark the task as blocking. Otherwise our pool will quickly run out. For instance using `ForkJoinPool.managedBlock`. It's doable but involves more code and joining the 4 `CompletableFuture`s is not that straightforward in Java. Java not having something like a `do notation` (for comprehension ...) to easily combine futures.  
+- We could create a `Runnable` class to read from input stream. But then the threads will have to report back errors to the main thread. 
 
 ## Modern java
 The `--enable-preview` flag is needed because `java.util.concurrent.StructuredTaskScope` is still a preview api ([JEP 505](https://openjdk.org/jeps/505)). Virtual threads themselves are final since Java 21.
