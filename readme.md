@@ -1,11 +1,11 @@
 
-# java ProcessBuilder, virtual threads and structured concurrency
+# Java ProcessBuilder, Virtual Threads and Structured Concurrency
 
 A few utility methods to run a process from Java with structured concurrency, using some newer Java features.
 
 Requires Java `25` with `--enable-preview`.
 
-## design
+## Design
 Our requirements:
 - The `java.lang.ProcessBuilder` api requires us to read the standard output and standard error of the process in separate threads.  
 - We need to destroy the process after we are done with it. For error cases as well.  
@@ -16,7 +16,7 @@ Our requirements:
 
 Structured concurrency can help us with this. The blocking calls can be handled with virtual threads, of which we can afford one per stream. And the structured concurrency helps us with error handling and making sure to clean up resources. Both came out of Project Loom, which is where this repo got its name.
 
-## how to use
+## How to use
 In memory example:
 ```java
     var toZip = "zip me";
@@ -64,7 +64,7 @@ Here we use `Gatherers#windowFixed(int)` to batch events before we handle them a
         IO.println("lines on stderr: " + result.stderr());
     }
 ```
-## how does it work
+## How does it work
 The `startProcess` method returns a `RunningProcess` that implements `AutoCloseable`. And thus we support `try-with-resources`.
 ```java
     public static RunningProcess startProcess(String[] cmd, @Nullable StdinSource stdin, Duration timeoutAfter, Duration gracePeriod) throws IOException {
@@ -119,7 +119,7 @@ Some alternatives that were considered before using virtual threads and structur
 We could follow the lead of `java.lang.Process.onExit` and use `CompletableFuture`s to read the input streams. For instance using `CompletableFuture.supplyAsync`. That would run the task on the `ForkJoinPool.commonPool()`. But then we need to take special care to mark the task as blocking. Otherwise our pool will quickly run out. For instance using `ForkJoinPool.managedBlock`. It's doable but involves more code and joining the 4 `CompletableFuture`s is not that straightforward in Java. Java not having something like a `do notation` (for comprehension ...) to easily combine futures.  
 We could create a `Runnable` class to read from input stream. But then the threads will have to report back errors to the main thread. 
 
-## modern java
+## Modern java
 The `--enable-preview` flag is needed because `java.util.concurrent.StructuredTaskScope` is still a preview api ([JEP 505](https://openjdk.org/jeps/505)). Virtual threads themselves are final since Java 21.
 
 Java has improved a lot in recent years!
