@@ -1,22 +1,22 @@
 import org.example.RunningProcess;
 
 import static org.example.ProcessRunner.startProcess;
+import static java.lang.IO.println;
 
-
-void main() throws IOException, ExecutionException, InterruptedException, TimeoutException {
+void main() throws IOException, InterruptedException {
     var toZip = "zip me";
 
     String[] cmd = {"gzip", "-c"};
-    try (RunningProcess runningProcess = startProcess(cmd, toZip.getBytes(StandardCharsets.UTF_8), Duration.ofSeconds(5))) {
+    try (RunningProcess runningProcess = startProcess(cmd, toZip.getBytes(StandardCharsets.UTF_8), Duration.ofSeconds(5), Duration.ofSeconds(5))) {
 
-        System.out.println("started process with pid: " + runningProcess.getProcess().pid());
+        println("started process with pid: " + runningProcess.getProcess().pid());
         var result = runningProcess.waitFor();
-        System.out.println("exit value: " + result.exitValue());
+        println("exit value: " + result.exitValue());
         var zipped = result.stdout();
 
         var unzippedAgain = unzip(zipped);
 
-        System.out.println("as expected: " + unzippedAgain.equals(toZip));
+        println("as expected: " + unzippedAgain.equals(toZip));
     }
 }
 
