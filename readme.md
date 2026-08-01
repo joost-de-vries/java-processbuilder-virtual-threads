@@ -41,7 +41,7 @@ If stdin is too large to hold in memory provide a lazy inputstream instead of th
 ```
 
 For a long running task there can be more output than we want to load in memory at the same time. Also we may want to respond as lines come in.
-Here we use [Gatherers#windowFixed(int)] to batch events before we handle them as they arrive.
+Here we use `Gatherers#windowFixed(int)` to batch events before we handle them as they arrive.
 ```java
     String[] cmd = {"perl", "-e", "$| = 1; for (1..7) { print \"event $_\\n\"; select(undef, undef, undef, 0.25); }"};
 
