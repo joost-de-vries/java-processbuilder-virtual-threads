@@ -99,7 +99,7 @@ We fork virtual threads to write stdin, read stdout, read stderr and wait for th
     }
 ```
 
-Unfortunately `java.lang.Process.deastroy()` doesn't signal child processes. So we do that manually. Also if processes do not terminate gracefully we do that by force after the grace period.
+Unfortunately `java.lang.Process.destroy()` doesn't signal child processes. So we do that manually. Also if processes do not terminate gracefully we do that by force after the grace period.
 ```java
     private void destroyProcessTree() {
         var descendants = process.descendants().toList();
