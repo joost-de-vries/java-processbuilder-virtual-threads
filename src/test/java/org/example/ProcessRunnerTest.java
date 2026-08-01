@@ -5,22 +5,25 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.StructuredTaskScope.FailedException;
 import java.util.concurrent.StructuredTaskScope.TimeoutException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.example.ProcessRunner.startProcess;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Assumes that every system running these tests has gzip, perl, sh, ps, lsof and kill installed.
 class ProcessRunnerTest {
@@ -30,6 +33,11 @@ class ProcessRunnerTest {
     public static RunningProcess startDefault(String[] cmd, byte[] stdin) throws IOException {
         return startProcess(cmd, stdin, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT);
     }
+
+    public static RunningProcess startDefault(String[] cmd, StdinSource stdin) throws IOException {
+        return startProcess(cmd, stdin, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT);
+    }
+
     public static RunningProcess startDefault(String[] cmd) throws IOException {
         return startProcess(cmd, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT);
     }
@@ -90,7 +98,7 @@ class ProcessRunnerTest {
     }
 
     @Test
-    @DisplayName("teleport large response")
+    @DisplayName("large argument")
     void largeResponse(@TempDir Path tempDir) throws Exception {
         var largeFile = tempDir.resolve("nodes.json");
         Files.writeString(largeFile, "x".repeat(4 * 1024 * 1024), UTF_8);
@@ -252,11 +260,189 @@ class ProcessRunnerTest {
     }
 
     @Test
+    @DisplayName("stream stdin from a file instead of from memory")
+    void streamStdinFromFile(@TempDir Path tempDir) throws Exception {
+        var cargo = tempDir.resolve("cargo.txt");
+        Files.writeString(cargo, "x".repeat(4 * 1024 * 1024), UTF_8);
+
+        // no wrapping needed: a StdinSource may throw IOException
+        try (var runningProcess = startDefault(new String[]{"cat"}, () -> Files.newInputStream(cargo))) {
+            var result = runningProcess.waitFor();
+
+            assertEquals(0, result.exitValue());
+            assertEquals(Files.size(cargo), result.stdout().length);
+        }
+    }
+
+    @Test
+    @DisplayName("open supplied stdin only when waited for, and close it afterwards")
+    void suppliedStdinIsOpenedLazilyAndClosed() throws Exception {
+        var opened = new AtomicInteger();
+        var closed = new AtomicBoolean();
+
+        StdinSource stdin = () -> {
+            opened.incrementAndGet();
+            return new FilterInputStream(new ByteArrayInputStream("cargo".getBytes(UTF_8))) {
+                @Override
+                public void close() throws IOException {
+                    closed.set(true);
+                    super.close();
+                }
+            };
+        };
+
+        try (var runningProcess = startDefault(new String[]{"cat"}, stdin)) {
+            assertEquals(0, opened.get(), "the stream should not be opened before waitFor");
+
+            var result = runningProcess.waitFor();
+
+            assertEquals(0, result.exitValue());
+            assertArrayEquals("cargo".getBytes(UTF_8), result.stdout());
+            assertEquals(1, opened.get(), "the stream should be opened exactly once");
+            assertTrue(closed.get(), "we opened the stream, so we should have closed it");
+        }
+    }
+
+    @Test
+    @DisplayName("close supplied stdin even when the process does not read it")
+    void suppliedStdinIsClosedWhenTheProcessDoesNotReadIt() throws Exception {
+        var closed = new AtomicBoolean();
+
+        StdinSource stdin = () -> new FilterInputStream(new ByteArrayInputStream("x".repeat(1_000_000).getBytes(UTF_8))) {
+            @Override
+            public void close() throws IOException {
+                closed.set(true);
+                super.close();
+            }
+        };
+
+        // the broken pipe must not leave the stream we opened dangling
+        try (var runningProcess = startDefault(new String[]{"sh", "-c", "exit 0"}, stdin)) {
+            var result = runningProcess.waitFor();
+
+            assertEquals(0, result.exitValue());
+            assertTrue(closed.get(), "the stream should be closed even though the pipe broke");
+        }
+    }
+
+    @Test
+    @DisplayName("fail when opening stdin fails")
+    void failWhenOpeningStdinFails() throws Exception {
+        StdinSource stdin = () -> {
+            throw new IOException("no such cargo");
+        };
+
+        // unlike a process that ignores stdin, failing to produce stdin at all is our failure to report, and the
+        // IOException must not be swallowed as if it were the broken pipe of a process that stopped reading
+        try (var runningProcess = startDefault(new String[]{"cat"}, stdin)) {
+            var failure = assertThrows(FailedException.class, runningProcess::waitFor);
+
+            var cause = assertInstanceOf(IOException.class, failure.getCause());
+            assertEquals("no such cargo", cause.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("fail when stdin is opened as null")
+    void failWhenStdinIsOpenedAsNull() throws Exception {
+        StdinSource stdin = () -> null;
+
+        try (var runningProcess = startDefault(new String[]{"cat"}, stdin)) {
+            var failure = assertThrows(FailedException.class, runningProcess::waitFor);
+
+            assertInstanceOf(NullPointerException.class, failure.getCause());
+        }
+    }
+
+    @Test
+    @DisplayName("hand stdout lines to the handler as they arrive, not at the end")
+    void streamStdoutLinesAsTheyArrive() throws Exception {
+        // flushes the first line and only then pauses, so an eager reader would deliver both lines at the same moment
+        var cmd = new String[]{"perl", "-e", "$| = 1; print \"one\\n\"; sleep 1; print \"two\\n\";"};
+        var arrivalMillis = new ArrayList<Long>();
+
+        try (var runningProcess = startDefault(cmd)) {
+            var start = System.nanoTime();
+
+            var result = runningProcess.waitForLines(
+                    lines -> lines.map(line -> {
+                        arrivalMillis.add((System.nanoTime() - start) / 1_000_000);
+                        return line;
+                    }).toList(),
+                    Stream::count);
+
+            assertEquals(0, result.exitValue());
+            assertEquals(List.of("one", "two"), result.stdout());
+            assertEquals(2, arrivalMillis.size());
+            assertTrue(arrivalMillis.get(1) - arrivalMillis.getFirst() > 500,
+                    "the lines should arrive a second apart, but arrived at " + arrivalMillis);
+        }
+    }
+
+    @Test
+    @DisplayName("handle stdout and stderr independently")
+    void handleStdoutAndStderrIndependently() throws Exception {
+        var cmd = new String[]{"perl", "-e", "print STDOUT \"cargo $_\\n\" for 1..3; print STDERR \"warning $_\\n\" for 1..5;"};
+
+        try (var runningProcess = startDefault(cmd)) {
+            var result = runningProcess.waitForLines(lines -> lines.map(String::toUpperCase).toList(), Stream::count);
+
+            assertEquals(0, result.exitValue());
+            assertEquals(List.of("CARGO 1", "CARGO 2", "CARGO 3"), result.stdout());
+            assertEquals(5L, (long) result.stderr());
+        }
+    }
+
+    @Test
+    @DisplayName("boil down more output than we would want to hold in memory")
+    void streamLargeStdoutWithoutCapturingIt() throws Exception {
+        var cmd = new String[]{"perl", "-e", "print \"line $_\\n\" for 1..200000;"};
+
+        try (var runningProcess = startDefault(cmd)) {
+            var result = runningProcess.waitForLines(lines -> lines.filter(line -> line.endsWith("7")).count(), Stream::count);
+
+            assertEquals(0, result.exitValue());
+            assertEquals(20_000L, (long) result.stdout(), "every tenth of the 200000 lines ends in a 7");
+        }
+    }
+
+    @Test
+    @DisplayName("fail when a line handler throws")
+    void failWhenLineHandlerThrows() throws Exception {
+        try (var runningProcess = startDefault(new String[]{"echo", "cargo"})) {
+            var failure = assertThrows(FailedException.class, () -> runningProcess.<String, Long>waitForLines(
+                    _ -> {
+                        throw new IllegalStateException("handler gave up");
+                    },
+                    Stream::count));
+
+            assertInstanceOf(IllegalStateException.class, failure.getCause());
+        }
+    }
+
+    @Test
+    @DisplayName("no deadlock when both streamed stdout and stderr exceed the pipe buffer")
+    void noDeadlockOnLargeStreamedStdoutAndStderr() throws Exception {
+        // the reason the streams are handled inside the scope: a stream handed back to the caller would let them drain
+        // one pipe while the other filled up, which is the deadlock a forked task per pipe avoids
+        var cmd = new String[]{"perl", "-e", "print STDOUT \"o$_\\n\" for 1..100000; print STDERR \"e$_\\n\" for 1..100000;"};
+
+        try (var runningProcess = startDefault(cmd)) {
+            var result = runningProcess.waitForLines(Stream::count, Stream::count);
+
+            assertEquals(0, result.exitValue());
+            assertEquals(100_000L, (long) result.stdout());
+            assertEquals(100_000L, (long) result.stderr());
+        }
+    }
+
+    @Test
     @DisplayName("destroy grandchildren too")
     void grandchildIsDestroyed() throws Exception {
-        record Pids(long process, long grandchild) {}
+        record Pids(long process, long grandchild) {
+        }
 
-        var pids = using(startProcess(new String[]{"sh", "-c", "sleep 30 & wait"}, Duration.ofMillis(500),Duration.ofMillis(500)), runningProcess -> {
+        var pids = using(startProcess(new String[]{"sh", "-c", "sleep 30 & wait"}, Duration.ofMillis(500), Duration.ofMillis(500)), runningProcess -> {
             var grandchildPid = awaitDescendant(runningProcess.getProcess());
 
             assertThrows(TimeoutException.class, runningProcess::waitFor);
@@ -336,7 +522,7 @@ class ProcessRunnerTest {
 
     private static void repeatTimingOut(int times) throws Exception {
         for (var i = 0; i < times; i++) {
-            try (var runningProcess = startProcess(new String[]{"sleep", "30"}, Duration.ofMillis(5),Duration.ofMillis(5))) {
+            try (var runningProcess = startProcess(new String[]{"sleep", "30"}, Duration.ofMillis(5), Duration.ofMillis(5))) {
                 assertThrows(TimeoutException.class, runningProcess::waitFor);
             }
         }

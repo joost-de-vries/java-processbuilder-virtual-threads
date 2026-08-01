@@ -11,7 +11,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class RunningProcess implements AutoCloseable {
 
-    RunningProcess(Process process, byte @Nullable [] stdin, Duration timeoutAfter, Duration gracePeriod) {
+    RunningProcess(Process process, @Nullable StdinSource stdin, Duration timeoutAfter, Duration gracePeriod) {
         this.process = requireNonNull(process, "process");
         this.stdin = stdin;
         this.gracePeriod = requireNonNull(gracePeriod, "gracePeriod");
@@ -24,32 +24,91 @@ public class RunningProcess implements AutoCloseable {
     /// @throws StructuredTaskScope.TimeoutException if the process did not finish within the timeout
     /// @throws StructuredTaskScope.FailedException  if reading stdout or stderr failed
     public ProcessResult waitFor() throws InterruptedException {
+        var result = waitFor(RunningProcess::readInputStream, RunningProcess::readInputStream);
+
+        return new ProcessResult(result.exitValue(), result.stdout(), result.stderr(), result.processId());
+    }
+
+    /// Hands stdout and stderr to the given handlers as lazy streams of lines, so output is processed as it arrives
+    /// instead of being held in memory in full.
+    ///
+    /// The handlers run on virtual threads that are guaranteed to be destroyed when waitForLines terminates.
+    ///
+    /// For that reason a handler must not let the stream escape, by returning it or by stashing it somewhere. Derive
+    /// a value from it — [Stream#toList()], [Stream#count()], a [java.util.stream.Gatherer] — and return that.
+    ///
+    /// @param <StdoutResult> what the stdout handler derives from the lines, and so what [StreamedResult#stdout()] holds
+    /// @param <StderrResult> what the stderr handler derives from the lines, and so what [StreamedResult#stderr()] holds
+    /// @throws StructuredTaskScope.TimeoutException if the process did not finish within the timeout
+    /// @throws StructuredTaskScope.FailedException  if a handler threw, or reading stdout or stderr failed
+    public <StdoutResult extends @Nullable Object, StderrResult extends @Nullable Object>
+    StreamedResult<StdoutResult, StderrResult> waitForLines(Charset charset,
+                                                            Function<Stream<String>, StdoutResult> stdout,
+                                                            Function<Stream<String>, StderrResult> stderr)
+            throws InterruptedException {
+
+        requireNonNull(charset, "charset");
+        requireNonNull(stdout, "stdout");
+        requireNonNull(stderr, "stderr");
+
+        return waitFor(inputStream -> handleLines(inputStream, charset, stdout),
+                inputStream -> handleLines(inputStream, charset, stderr));
+    }
+
+    /// Assumes the process writes UTF-8. See [RunningProcess#waitForLines(Charset, Function, Function)]
+    public <StdoutResult extends @Nullable Object, StderrResult extends @Nullable Object>
+    StreamedResult<StdoutResult, StderrResult> waitForLines(Function<Stream<String>, StdoutResult> stdout,
+                                                            Function<Stream<String>, StderrResult> stderr)
+            throws InterruptedException {
+
+        return waitForLines(StandardCharsets.UTF_8, stdout, stderr);
+    }
+
+    private <StdoutResult extends @Nullable Object, StderrResult extends @Nullable Object>
+    StreamedResult<StdoutResult, StderrResult> waitFor(OutputHandler<StdoutResult> stdoutHandler,
+                                                       OutputHandler<StderrResult> stderrHandler)
+            throws InterruptedException {
+
         scope.fork(this::readStdin);
 
-        var stdout = scope.fork(() -> readInputStream(new BufferedInputStream(process.getInputStream())));
-        var stderr = scope.fork(() -> readInputStream(new BufferedInputStream(process.getErrorStream())));
-        // an explicit lambda rather than a method reference: Process.waitFor is overloaded, which makes the
-        // method reference inexact and thus ambiguous between fork(Callable) and fork(Runnable)
+        var stdout = scope.fork(() -> stdoutHandler.handle(process.getInputStream()));
+        var stderr = scope.fork(() -> stderrHandler.handle(process.getErrorStream()));
         var exitValue = scope.fork(() -> process.waitFor());
 
         scope.join();
 
-        return new ProcessResult(exitValue.get(), stdout.get(), stderr.get(), process.pid());
+        return new StreamedResult<>(exitValue.get(), stdout.get(), stderr.get(), process.pid());
     }
 
-    private void readStdin() {
+    /// Turns one pipe into whatever its handler makes of it, and is where a handler runs.
+    @FunctionalInterface
+    private interface OutputHandler<Result extends @Nullable Object> {
+        Result handle(InputStream inputStream) throws IOException;
+    }
+
+    /// Returns [Void] rather than being a plain `void` method so that it forks as a [Callable] and can report the
+    /// [IOException] of a source that fails to open.
+    private @Nullable Void readStdin() throws IOException {
         if (stdin == null) {
-            return;
+            return null;
         }
 
-        try (var outputStream = new BufferedOutputStream(process.getOutputStream())) {
-            outputStream.write(stdin);
+        // opening here rather than in the constructor keeps it off the caller its thread and means a stream is only ever
+        // created for a process that gets as far as being waited for
+        var source = requireNonNull(stdin.open(), "stdin.open()");
+
+        // closing order matters and is the reverse of this list: stdin of the process closes first, so it sees end of
+        // input, and only then the source we opened.
+        try (source; var outputStream = process.getOutputStream()) {
+            source.transferTo(outputStream);
 
         } catch (IOException _) {
             // The process is free to exit or close its stdin without reading all of it. The pipe then breaks,
             // which surfaces as 'Broken pipe' or 'Stream closed' depending on timing. That is the process its
             // prerogative and not a failure of ours, so it must not fail the scope: the exit value tells the story.
         }
+
+        return null;
     }
 
     @Override
@@ -99,13 +158,22 @@ public class RunningProcess implements AutoCloseable {
     }
 
     private final Process process;
-    private final byte @Nullable [] stdin;
+    private final @Nullable StdinSource stdin;
     private final Duration gracePeriod;
     private final StructuredTaskScope<Object, Void> scope;
 
-    private static byte[] readInputStream(BufferedInputStream inputStream) throws IOException {
+    private static byte[] readInputStream(InputStream inputStream) throws IOException {
         try (inputStream) {
             return inputStream.readAllBytes();
+        }
+    }
+
+    /// Use a [BufferedReader] not to read a line at a time
+    private static <Result extends @Nullable Object> Result handleLines(
+            InputStream inputStream, Charset charset, Function<Stream<String>, Result> handler) throws IOException {
+
+        try (var reader = new BufferedReader(new InputStreamReader(inputStream, charset))) {
+            return handler.apply(reader.lines());
         }
     }
 }
