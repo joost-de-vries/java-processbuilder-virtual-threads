@@ -14,7 +14,7 @@ Our requirements:
 - we want the option of not reading stdin, stdout, stderr all at once in memory
 - We want the `process id` before we start waiting for the process to finish. So we can test error scenarios where the process is killed by the OS or by Kubernetes.
 
-Structured concurrency can help us with this. The blocking calls can be handled with virtual threads, of which we can afford one per stream. And the structured concurrency helps us with error handling and making sure to clean up resources. Both came out of Project Loom, which is where this repo got its name.
+Structured concurrency can help us with this. The blocking calls can be handled with virtual threads, of which we can afford one per stream. And the structured concurrency helps us with error handling and making sure to clean up resources.
 
 ## How to use
 In memory example:
