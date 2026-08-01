@@ -126,9 +126,11 @@ Java has improved a lot in recent years!
 - Virtual threads ([JEP 444](https://openjdk.org/jeps/444)) and structured concurrency.
 - Records and sealed interfaces and pattern matching for data oriented programming.
 - try-with-resources for AutoCloseable resources.
+- stream gatherers for stream processing ([JEP 485](https://openjdk.org/jeps/485))
 - `var` for local variables.
 - JSpecify `@NullMarked` / `@Nullable` to distinguish mandatory from optional arguments. No [JEP 8303099](https://openjdk.org/jeps/8303099) (Null-Restricted and Nullable Types) yet, unfortunately, that is still a draft.
-- stream gatherers for stream processing ([JEP 485](https://openjdk.org/jeps/485))
+
+Some smaller niceties used:  
 - Compact source files and instance `main` methods ([JEP 512](https://openjdk.org/jeps/512))
 - `java.lang.IO.println` instead of `System.out.println`
 - Module import declarations ([JEP 511](https://openjdk.org/jeps/511)): `import module java.base;` replaces a dozen single-type imports in `RunningProcess`.
